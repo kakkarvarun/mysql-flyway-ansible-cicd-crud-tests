@@ -1,0 +1,19 @@
+---
+- name: PROG8850 - Tear down MySQL
+  hosts: local
+  gather_facts: false
+  vars:
+    network_name: "prog8850_net"
+    container_name: "mysql_prog8850"
+
+  tasks:
+    - name: Remove MySQL container
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        state: absent
+        force_kill: true
+
+    - name: Remove Docker network
+      community.docker.docker_network:
+        name: "{{ network_name }}"
+        state: absent

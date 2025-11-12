@@ -1,0 +1,79 @@
+---
+- name: PROG8850 - Bring up MySQL and run initial Flyway migration
+  hosts: local
+  gather_facts: false
+  vars:
+    network_name: "prog8850_net"
+    container_name: "mysql_prog8850"
+    db_name: "prog8850_db"
+    root_password: "rootpw"
+    app_user: "app_user"
+    app_password: "app_password"
+    mysql_image: "mysql:8.0"
+    flyway_image: "flyway/flyway:10"
+    host_repo: "{{ lookup('env','HOST_REPO') }}"  # MUST be passed from docker run
+
+  tasks:
+    - name: Create Docker network
+      community.docker.docker_network:
+        name: "{{ network_name }}"
+        state: present
+
+    - name: Start MySQL container
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: "{{ mysql_image }}"
+        state: started
+        restart_policy: unless-stopped
+        published_ports:
+          - "3306:3306"
+        env:
+          MYSQL_ROOT_PASSWORD: "{{ root_password }}"
+          MYSQL_DATABASE: "{{ db_name }}"
+        networks:
+          - name: "{{ network_name }}"
+
+    - name: Wait for MySQL to accept connections (ping via mysqladmin)
+      community.docker.docker_container:
+        name: "mysql_wait_tmp"
+        image: "{{ mysql_image }}"
+        command: >
+          sh -lc 'for i in $(seq 1 40); do
+          mysqladmin ping -h {{ container_name }} -p{{ root_password }} --silent && exit 0;
+          sleep 2; done; exit 1'
+        detach: false
+        auto_remove: true
+        networks:
+          - name: "{{ network_name }}"
+
+    - name: Create application user and grant privileges
+      community.docker.docker_container:
+        name: "mysql_user_tmp"
+        image: "{{ mysql_image }}"
+        command: >
+          sh -lc "mysql -h {{ container_name }} -uroot -p{{ root_password }}
+          -e \"CREATE USER IF NOT EXISTS '{{ app_user }}'@'%%' IDENTIFIED BY '{{ app_password }}';
+          GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ app_user }}'@'%%';
+          FLUSH PRIVILEGES;\""
+        detach: false
+        auto_remove: true
+        networks:
+          - name: "{{ network_name }}"
+
+    - name: Run initial Flyway migration (V1)
+      community.docker.docker_container:
+        name: "flyway_v1_tmp"
+        image: "{{ flyway_image }}"
+        command:
+          - "-url=jdbc:mysql://{{ container_name }}:3306/{{ db_name }}?allowPublicKeyRetrieval=true&useSSL=false"
+          - "-user={{ app_user }}"
+          - "-password={{ app_password }}"
+          - "-locations=filesystem:/flyway/sql"
+          - "-connectRetries=20"
+          - "migrate"
+        detach: false
+        auto_remove: true
+        networks:
+          - name: "{{ network_name }}"
+        volumes:
+          - "{{ host_repo }}/flyway/migrations_initial:/flyway/sql:ro"

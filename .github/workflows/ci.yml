@@ -1,0 +1,97 @@
+name: CI - Flyway + Pytest
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpw
+          MYSQL_DATABASE: prog8850_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -prootpw"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Wait for MySQL
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 -prootpw --silent; then
+              echo "MySQL is ready"; break
+            fi
+            sleep 2
+          done
+
+      - name: Create app user (root via TCP)
+        run: |
+          mysql -h 127.0.0.1 -uroot -prootpw -e "CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY 'app_password'; GRANT ALL PRIVILEGES ON prog8850_db.* TO 'app_user'@'%'; FLUSH PRIVILEGES;"
+
+      - name: Install Flyway CLI
+        run: |
+          curl -L https://repo1.maven.org/maven2/org/flywaydb/flyway-commandline/10.22.0/flyway-commandline-10.22.0-linux-x64.tar.gz | tar xz
+          sudo ln -s $PWD/flyway-10.22.0/flyway /usr/local/bin/flyway
+          flyway -v
+
+      - name: Run initial migrations (V1)
+        env:
+          FLYWAY_URL: jdbc:mysql://127.0.0.1:3306/prog8850_db?allowPublicKeyRetrieval=true&useSSL=false
+          FLYWAY_USER: app_user
+          FLYWAY_PASSWORD: app_password
+        run: |
+          flyway -url="$FLYWAY_URL" -user="$FLYWAY_USER" -password="$FLYWAY_PASSWORD" \
+            -locations=filesystem:./flyway/migrations_initial \
+            -connectRetries=20 \
+            migrate
+
+      - name: Run incremental migrations (V2) with both locations (validation OK)
+        env:
+          FLYWAY_URL: jdbc:mysql://127.0.0.1:3306/prog8850_db?allowPublicKeyRetrieval=true&useSSL=false
+          FLYWAY_USER: app_user
+          FLYWAY_PASSWORD: app_password
+        run: |
+          flyway -url="$FLYWAY_URL" -user="$FLYWAY_USER" -password="$FLYWAY_PASSWORD" \
+            -locations=filesystem:./flyway/migrations_initial,filesystem:./flyway/migrations_incremental \
+            -connectRetries=20 \
+            migrate
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test deps
+        run: python -m pip install -r requirements.txt
+
+      - name: Run tests (pytest → JUnit XML)
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_NAME: prog8850_db
+          DB_USER: app_user
+          DB_PASS: app_password
+        run: |
+          mkdir -p reports
+          pytest -q --junitxml=reports/junit.xml
+
+      - name: Upload test report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: reports/junit.xml
+
+      - name: Deployment summary
+        run: echo "Deployment done for commit $GITHUB_SHA"
